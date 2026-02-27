@@ -1,17 +1,27 @@
 services:
+  postgres:
+    # image: pgvector/pgvector:pg17
+    env_file:
+      - .env
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER}"]
+      timeout: 5s
+      start_period: 3s
+      interval: 2s
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    build: . 
   rag:
     build: rag/
     stdin_open: True
     tty: True
-    extra_hosts:
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    extra_hosts: 
       - "host.docker.internal:host-gateway"
-  postgres:
-    # image: pgvector/pgvector:pg17
-    environment:
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    build: .
 volumes:
   postgres_data:
     
