@@ -1,0 +1,16 @@
+FROM python:3.13-slim
+
+# we set the working directory of the container to app
+WORKDIR /app
+
+# mv requirements into this container's app directory
+COPY requirements.txt .
+
+# installs the requirements
+RUN pip3 install -r requirements.txt
+
+# in my use-case im just copying the rag. but you have to remember to copy the actual rag bro. otherwise it'll be like "wheres rag.py"
+COPY . .
+
+# executes this command at runtime. Runs this after image is built
+CMD ["python3", "rag.py"]

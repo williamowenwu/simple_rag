@@ -1,0 +1,17 @@
+services:
+  rag:
+    build: rag/
+    stdin_open: True
+    tty: True
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+  postgres:
+    # image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    build: .
+volumes:
+  postgres_data:
+    
