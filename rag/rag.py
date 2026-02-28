@@ -1,14 +1,11 @@
 import ollama
-import psycopg
-import os
 from psycopg.types.json import Jsonb
-from pgvector.psycopg import register_vector
 
+from db import get_conn
 
 # vector database
 EMBEDDING_MODEL = 'hf.co/CompendiumLabs/bge-base-en-v1.5-gguf'
 LANGUAGE_MODEL = 'hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF'
-DB_PASSWORD = os.getenv('POSTGRES_PASSWORD')
 
 client = ollama.Client(host="http://host.docker.internal:11434")
 # load data set
@@ -19,25 +16,24 @@ def load_data(filepath: str) -> list[str]:
         return dataset
 
 def add_dataset_to_db(data_set: list[str]) -> None:
-    with psycopg.connect(f" host=postgres dbname=postgres user=postgres password={DB_PASSWORD}") as conn: 
-        register_vector(conn)
-        with conn.cursor() as curr: 
-            curr.execute("TRUNCATE TABLE chunks")
-        # chunking strategy of one line
-        for i, chunk in enumerate(data_set): # using a line for simplicity?
-            embeddings = client.embed(EMBEDDING_MODEL, input=chunk)
-            embedding = embeddings['embeddings'][0]
-            
-            with conn.cursor() as cur:    
-                cur.execute(
-                    """
-                    INSERT INTO chunks
-                    (content, embedding, metadata) 
-                    VALUES (%s, %s, %s) 
-                    """,
-                    (chunk, embedding, Jsonb({}))
-                ) 
-            print(f"Added chunk {i+1}/{len(data_set)} to vector db")
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("TRUNCATE TABLE chunks")
+                # chunking strategy of one line
+                for i, chunk in enumerate(data_set): # using a line for simplicity?
+                    embeddings = client.embed(EMBEDDING_MODEL, input=chunk)
+                    embedding = embeddings['embeddings'][0]
+                    
+                    cur.execute(
+                        """
+                        INSERT INTO chunks
+                        (content, embedding, metadata) 
+                        VALUES (%s, %s, %s) 
+                        """,
+                        (chunk, embedding, Jsonb({}))
+                    ) 
+                    print(f"Added chunk {i+1}/{len(data_set)} to vector db")
+
 """
 cosine similarity measures the similarity between two non zero vectors by calculating the cosine angle between them.
 The range is -1 to 1. 1 is identical. -1 is exactly opposite 
@@ -51,24 +47,22 @@ def cosine_similarity(a,b):
     return dot_product / (norm_a * norm_b)
 
 # obtains top x similarities in search and returns them
-def retrieve(query, top=3) -> list[tuple]:
+def retrieve(conn, query: str, top:int=3) -> list[tuple]:
     query_embedding = client.embed(EMBEDDING_MODEL, input=query)
     query_embeded = query_embedding['embeddings'][0]
 
-    with psycopg.connect(f" host=postgres dbname=postgres user=postgres password={DB_PASSWORD}") as conn:
-        register_vector(conn)
-        with conn.cursor() as cur:
-           cur.execute(
-               """
-               SELECT content, 1 - (embedding <=> %s::vector) as cosine_similarity
-               FROM chunks
-               ORDER BY cosine_similarity DESC
-               LIMIT %s
-               """,
-               (query_embeded, top)
-           )
-           # no need to convert?
-           return cur.fetchall()
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT content, 1 - (embedding <=> %s::vector) as cosine_similarity
+            FROM chunks
+            ORDER BY cosine_similarity DESC
+            LIMIT %s
+            """,
+            (query_embeded, top)
+        )
+        # no need to convert?
+        return cur.fetchall()
 
            # then convert
 
