@@ -1,25 +1,28 @@
 import os
 import logging
-from contextlib import contextmanager
-import psycopg
-from pgvector.psycopg import register_vector
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from psycopg import AsyncConnection
+from pgvector.psycopg import register_vector_async
 
 
 DB_PASSWORD = os.getenv("POSTGRES_PASSWORD", 'postgres')
 DB_USER = os.getenv("POSTGRES_USER",'postgres')
 
-@contextmanager
-def get_conn():
+@asynccontextmanager
+async def get_conn() -> AsyncIterator[AsyncConnection]:
     conn = None
     try:
         # what happens if there is an error at this part?
-        conn = psycopg.connect(f"host=postgres user={DB_USER} password={DB_PASSWORD} dbname=postgres")
-        register_vector(conn)
+        conn = await AsyncConnection.connect(f"host=postgres user={DB_USER} password={DB_PASSWORD} dbname=postgres")
+        await register_vector_async(conn)
         yield conn
-    # i probably shouldn't do this
-    except Exception as e:
+    except BaseException as e:
         logging.error(f"Exception: {e}",)
+        await conn.rollback()
         raise
+    else:
+        await conn.commit()
     finally:
         if conn:
-            conn.close()
+            await conn.close()

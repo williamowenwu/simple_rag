@@ -6,8 +6,8 @@ services:
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER}"]
       timeout: 5s
-      start_period: 2s
-      interval: 2s
+      start_period: 1s
+      interval: 1s
     volumes:
       - postgres_data:/var/lib/postgresql/data
     build: . 
