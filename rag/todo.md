@@ -4,11 +4,11 @@
 
 - [x] Chunking strategy (sentence/paragraph, overlap)
 
-3. Hybrid retrieval — BM25 + vector + reranking
+- [x] Hybrid retrieval — BM25 + vector + reranking
 
 - [x] Async db client
 
-5. Better model (7B+)
+5. - [x] Better model (7B+)
 6. Documents to vector DB (PDFs, multiple sources)
 
 ## Productionizing

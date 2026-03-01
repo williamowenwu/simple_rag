@@ -1,13 +1,19 @@
 import asyncio
+from collections import defaultdict
 import ollama
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from psycopg.types.json import Jsonb
+from rank_bm25 import BM25Okapi, BM25
 
 from db import get_conn
 
 # vector database
 EMBEDDING_MODEL = 'hf.co/CompendiumLabs/bge-base-en-v1.5-gguf'
 LANGUAGE_MODEL = 'hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF'
+QWEN = 'hf.co/Qwen/Qwen2.5-7B-Instruct-GGUF:latest'
+
+bm25: BM25 | None = None
+chunks: list[str] | None = None
 
 client = ollama.Client(host="http://host.docker.internal:11434")
 # line by line chunking strategy
@@ -47,6 +53,74 @@ async def add_dataset_to_db(data_set: list[str]) -> None:
                 ) 
                 print(f"Added chunk {i+1}/{len(data_set)} to vector db")
 
+async def add_dataset_to_db_hybrid(data_set: list[str]) -> None:
+    async with get_conn() as conn:
+        global bm25
+        async with conn.cursor() as cur:
+            await cur.execute("TRUNCATE TABLE chunks")
+
+            bm25 = BM25Okapi([sentence.split() for sentence in data_set])
+
+            for i, chunk in enumerate(data_set): 
+                embeddings = client.embed(EMBEDDING_MODEL, input=chunk)
+                embedding = embeddings['embeddings'][0]
+                
+                await cur.execute(
+                    """
+                    INSERT INTO chunks
+                    (content, embedding, metadata) 
+                    VALUES (%s, %s, %s) 
+                    """,
+                    (chunk, embedding, Jsonb({}))
+                ) 
+                print(f"Added chunk {i+1}/{len(data_set)} to vector db")
+
+async def rrf(semantic_res: list[tuple[float,str]], bm25_res: list[tuple[float]], k=60) -> tuple[float,str]:
+    """
+    Reciprocal rank fusion
+    """
+    rrf_scores = defaultdict(float)
+    #* ah i see, the rank is really just the index of each list sorted
+ 
+    for rank, semantic_chunk in enumerate(semantic_res, start=1):
+        score_contribution = 1 / (k + rank)
+        bm25_chunk = bm25_res[rank-1][1]
+        rrf_scores[semantic_chunk[1]] += score_contribution
+        rrf_scores[bm25_chunk] += score_contribution
+    
+    # return the dict sorted by the values
+    return sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
+
+
+async def hybrid_retrieve(query: str, top:int=3) -> list[tuple]:
+    query_embedding = client.embed(EMBEDDING_MODEL, input=query)
+    query_embeded = query_embedding['embeddings'][0]
+    semantic_res = None
+
+    async with get_conn() as conn: 
+        async with conn.cursor() as cur:
+            await cur.execute(
+                """
+                SELECT 1 - (embedding <=> %s::vector) as cosine_similarity, content
+                FROM chunks
+                ORDER BY cosine_similarity DESC
+                LIMIT %s
+                """,
+                (query_embeded, top)
+            )
+    
+            # no need to convert?
+            semantic_res = await cur.fetchall()
+
+    tokenized_query = query.split()
+    doc_scores_index = bm25.get_scores(tokenized_query)
+    
+    # map the index with the chunk together
+    doc_scores = [(doc_scores_index[i], chunks[i]) for i in range(len(chunks))]
+    doc_scores = sorted(doc_scores, key=lambda x: x[0], reverse=True)[:top]
+    return await rrf(semantic_res, doc_scores)
+
+
 # obtains top x similarities in search and returns them
 async def retrieve(query: str, top:int=3) -> list[tuple]:
     query_embedding = client.embed(EMBEDDING_MODEL, input=query)
@@ -70,9 +144,11 @@ async def retrieve(query: str, top:int=3) -> list[tuple]:
 async def prompt_user():
     user_query = input("\n\nAsk me a question about cats dumbass: ")
     retrieved_knowledge = await retrieve(user_query)
+    # retrieved_knowledge = await hybrid_retrieve(user_query)
 
     print('Retrieved Knowledge: ')
     for chunk, similarity in retrieved_knowledge:
+        # print(f' - (rrf: {similarity:.4f}) {chunk}')
         print(f' - (similarity: {similarity:.4f}) {chunk}')
     
     instruction_prompt = f'''
@@ -84,7 +160,8 @@ async def prompt_user():
     # print(f'\n{instruction_prompt}')
 
     stream = client.chat(
-        model=LANGUAGE_MODEL,
+        # model=LANGUAGE_MODEL,
+        model=QWEN,
         messages=[
             {'role': 'system', 'content': instruction_prompt},
             {'role': 'user', 'content': user_query},
@@ -97,8 +174,10 @@ async def prompt_user():
         print(chunk['message']['content'], end='', flush=True)
 
 async def main():
+    global chunks
     chunks = await chunk_data('cat.txt')
     await add_dataset_to_db(chunks)
+    # await add_dataset_to_db_hybrid(chunks)
     
     while True:
         await prompt_user()
