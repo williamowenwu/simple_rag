@@ -1,9 +1,13 @@
 import asyncio
+from contextlib import asynccontextmanager
 from collections import defaultdict
 import ollama
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from psycopg.types.json import Jsonb
 from rank_bm25 import BM25Okapi, BM25
+from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 
 from db import get_conn
 
@@ -15,7 +19,26 @@ QWEN = 'hf.co/Qwen/Qwen2.5-7B-Instruct-GGUF:latest'
 bm25: BM25 | None = None
 chunks: list[str] | None = None
 
-client = ollama.Client(host="http://host.docker.internal:11434")
+class UserPrompt(BaseModel):
+    prompt: str
+
+@asynccontextmanager
+async def lifespan(app: FastAPI): 
+    global chunks # can call await directly becauses its async
+    chunks = await chunk_data('cat.txt')
+    # await add_dataset_to_db(chunks)
+    await add_dataset_to_db_hybrid(chunks)
+    yield
+
+app = FastAPI(lifespan=lifespan)
+
+# what do i need to be an api? there are somethings that don't necessarily need to be an api
+# anything that user interacts with the model (uploading things) :
+# 1. prompts/text
+# 1a. images (not yet)
+# i think its just the streaming of prompts back and forth. we don't need the underlying RAG logic to be exposed i think
+
+client = ollama.AsyncClient(host="http://host.docker.internal:11434")
 # line by line chunking strategy
 async def load_data(filepath: str) -> list[str]:
     with open(filepath) as f:
@@ -40,7 +63,7 @@ async def add_dataset_to_db(data_set: list[str]) -> None:
             await cur.execute("TRUNCATE TABLE chunks")
             # chunking strategy of one line
             for i, chunk in enumerate(data_set): 
-                embeddings = client.embed(EMBEDDING_MODEL, input=chunk)
+                embeddings = await client.embed(EMBEDDING_MODEL, input=chunk)
                 embedding = embeddings['embeddings'][0]
                 
                 await cur.execute(
@@ -62,7 +85,7 @@ async def add_dataset_to_db_hybrid(data_set: list[str]) -> None:
             bm25 = BM25Okapi([sentence.split() for sentence in data_set])
 
             for i, chunk in enumerate(data_set): 
-                embeddings = client.embed(EMBEDDING_MODEL, input=chunk)
+                embeddings = await client.embed(EMBEDDING_MODEL, input=chunk)
                 embedding = embeddings['embeddings'][0]
                 
                 await cur.execute(
@@ -93,7 +116,7 @@ async def rrf(semantic_res: list[tuple[float,str]], bm25_res: list[tuple[float]]
 
 
 async def hybrid_retrieve(query: str, top:int=3) -> list[tuple]:
-    query_embedding = client.embed(EMBEDDING_MODEL, input=query)
+    query_embedding = await client.embed(EMBEDDING_MODEL, input=query)
     query_embeded = query_embedding['embeddings'][0]
     semantic_res = None
 
@@ -123,7 +146,7 @@ async def hybrid_retrieve(query: str, top:int=3) -> list[tuple]:
 
 # obtains top x similarities in search and returns them
 async def retrieve(query: str, top:int=3) -> list[tuple]:
-    query_embedding = client.embed(EMBEDDING_MODEL, input=query)
+    query_embedding = await client.embed(EMBEDDING_MODEL, input=query)
     query_embeded = query_embedding['embeddings'][0]
 
     async with get_conn() as conn: 
@@ -140,6 +163,38 @@ async def retrieve(query: str, top:int=3) -> list[tuple]:
             # no need to convert?
             return await cur.fetchall()
 
+@app.post('/chat', response_class=StreamingResponse)
+async def start_chat(prompt: UserPrompt):
+    
+    knowledge = await hybrid_retrieve(prompt.prompt)
+    print('Retrieved Knowledge:')
+
+    res = {}
+    res['knowledge'] = knowledge
+    res['res'] = []
+
+    instruction_prompt = f""" 
+    You are a fact retrieval assistant. You MUST answer ONLY using the facts listed below. 
+    If the answer is not in the list, say "I don't know."
+    Do NOT use any outside knowledge. Do NOT make things up.
+    {'\n'.join([f' - {chunk}' for chunk, _ in knowledge])}
+    """
+ 
+    stream = await client.chat(
+        # model=LANGUAGE_MODEL,
+        model=QWEN,
+        messages=[
+            {'role': 'system', 'content': instruction_prompt},
+            {'role': 'user', 'content': prompt.prompt},
+        ],
+        stream=True
+    ) 
+
+    async for chunk in stream:
+        yield chunk['message']['content']
+    # res['status'] = 'success'
+    # return res
+
 # Generation Phase
 async def prompt_user():
     user_query = input("\n\nAsk me a question about cats dumbass: ")
@@ -152,14 +207,14 @@ async def prompt_user():
         print(f' - (similarity: {similarity:.4f}) {chunk}')
     
     instruction_prompt = f'''
-    # You are a fact retrieval assistant. You MUST answer ONLY using the facts listed below. 
-    # If the answer is not in the list, say "I don't know."
-    # Do NOT use any outside knowledge. Do NOT make things up.
+     You are a fact retrieval assistant. You MUST answer ONLY using the facts listed below. 
+     If the answer is not in the list, say "I don't know."
+    Do NOT use any outside knowledge. Do NOT make things up.
     {'\n'.join([f' - {chunk}' for chunk, similarity in retrieved_knowledge])}
     '''
     # print(f'\n{instruction_prompt}')
 
-    stream = client.chat(
+    stream = await client.chat(
         # model=LANGUAGE_MODEL,
         model=QWEN,
         messages=[

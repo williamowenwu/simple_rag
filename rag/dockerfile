@@ -13,4 +13,5 @@ RUN pip3 install -r requirements.txt
 COPY . .
 
 # executes this command at runtime. Runs this after image is built
-CMD ["python3", "rag.py"]
+# CMD ["python3", "rag.py"]
+CMD ["uvicorn", "rag:app", "--host=0.0.0.0"]
