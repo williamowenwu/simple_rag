@@ -13,7 +13,8 @@
 
 ## Productionizing
 
-7. Wrap in FastAPI (async, streaming, request timeouts)
+- [x] Wrap in FastAPI (async, streaming, request timeouts)
+
 8. Managing sessions
 9. Error handling and logging
 10. Input validation (Pydantic — comes free with FastAPI)
@@ -27,11 +28,16 @@
 
 ## Infrastructure
 
-15. CI/CD pipeline 16. Docker multi-stage builds 17. Kubernetes basics 18. README
+15. CI/CD pipeline 
+16. Docker multi-stage builds 
+17. Kubernetes basics 
+18. README
 
 ## Literacy
 
-19. Fine-tuning concepts — SFT vs LoRA/PEFT vs DPO 20. vLLM basics 21. Security/PII handling
+19. Fine-tuning concepts — SFT vs LoRA/PEFT vs DPO 
+20. vLLM basics 
+21. Security/PII handling
 
 ## Later
 

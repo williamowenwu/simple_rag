@@ -1,10 +1,14 @@
+import asyncio
 from contextlib import asynccontextmanager
 from collections import defaultdict
+import logging
+from uuid import UUID
+
 import ollama
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from psycopg.types.json import Jsonb
 from rank_bm25 import BM25Okapi, BM25
-from fastapi import FastAPI
+from fastapi import FastAPI, status, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -27,6 +31,7 @@ chunks: list[str] | None = None
 
 class UserPrompt(BaseModel):
     prompt: str
+    session_id: UUID | None = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI): 
@@ -39,9 +44,16 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 @app.post('/chat', response_class=StreamingResponse)
-async def start_chat(prompt: UserPrompt):
-    
-    knowledge = await hybrid_retrieve(prompt.prompt)
+async def start_chat(query: UserPrompt):
+    if not query.session_id:
+
+        async with get_conn() as conn:
+            async with conn.cursor() as curr:
+               pass 
+    else:
+       # obtain session from the database
+        pass
+    knowledge = await hybrid_retrieve(query.prompt)
     print('Retrieved Knowledge:')
     for chunk, similarity in knowledge:
         print(f' - (rrf: {similarity:.4f}) {chunk}')
@@ -56,19 +68,28 @@ async def start_chat(prompt: UserPrompt):
     Do NOT use any outside knowledge. Do NOT make things up.
     {'\n'.join([f' - {chunk}' for chunk, _ in knowledge])}
     """
+    try:
  
-    stream = await client.chat(
-        # model=LANGUAGE_MODEL,
-        model=QWEN,
-        messages=[
-            {'role': 'system', 'content': instruction_prompt},
-            {'role': 'user', 'content': prompt.prompt},
-        ],
-        stream=True
-    ) 
+        stream = await asyncio.wait_for(
+            client.chat(
+                # model=LANGUAGE_MODEL,
+                model=QWEN,
+                messages=[
+                    {'role': 'system', 'content': instruction_prompt},
+                    {'role': 'user', 'content': query.prompt},
+                ],
+                stream=True
+                ),
+            timeout=0)
 
-    async for chunk in stream:
-        yield chunk['message']['content']
+        async for chunk in stream:
+            yield chunk['message']['content']
+    except TimeoutError as te:
+        logging.error(f'error: {te}')
+        yield "Error Request Timeout"
+    except Exception as e:
+        logging.error(f'base error: {e}')
+        raise
     # res['status'] = 'success'
     # return res
 

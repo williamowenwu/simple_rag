@@ -14,7 +14,7 @@ async def get_conn() -> AsyncIterator[AsyncConnection]:
     conn = None
     try:
         # what happens if there is an error at this part?
-        conn = await AsyncConnection.connect(f"host=postgres user={DB_USER} password={DB_PASSWORD} dbname=postgres")
+        conn = await AsyncConnection.connect(f"host=postgres user={DB_USER} password={DB_PASSWORD} dbname=postgres", connect_timeout=1)
         await register_vector_async(conn)
         yield conn
     except BaseException as e:
