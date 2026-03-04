@@ -19,6 +19,7 @@ EMBEDDING_MODEL = 'hf.co/CompendiumLabs/bge-base-en-v1.5-gguf'
 LANGUAGE_MODEL = 'hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF'
 # Needs more than 4gb vram
 QWEN = 'hf.co/Qwen/Qwen2.5-7B-Instruct-GGUF:latest'
+client = ollama.AsyncClient(host="http://host.docker.internal:11434")
 
 # what do i need to be an api? there are somethings that don't necessarily need to be an api
 # anything that user interacts with the model (uploading things) :
@@ -31,11 +32,11 @@ chunks: list[str] | None = None
 
 class UserPrompt(BaseModel):
     prompt: str
-    session_id: UUID | None = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI): 
-    global chunks # can call await directly becauses its async
+    global chunks
+    # can call await directly becauses its async
     chunks = await chunk_data('cat.txt')
     # await add_dataset_to_db(chunks)
     await add_dataset_to_db_hybrid(chunks)
@@ -45,15 +46,47 @@ app = FastAPI(lifespan=lifespan)
 
 @app.post('/chat', response_class=StreamingResponse)
 async def start_chat(query: UserPrompt):
-    if not query.session_id:
+    # start a new session
+    initial_history = [{'role': 'user','content': query.prompt}]
+    async with get_conn() as conn:
+        async with conn.cursor() as curr:
+            cursor = await curr.execute(
+                """
+                INSERT INTO session (history)
+                VALUES (%s)
+                RETURNING session_id;
+                """,
+                (Jsonb(initial_history),)
+            )
+            row = await cursor.fetchone()
+            session_id = row[0]
+    
+    return StreamingResponse(prompt_llm(session_id, initial_history), media_type='text/plain')
+    
 
-        async with get_conn() as conn:
-            async with conn.cursor() as curr:
-               pass 
-    else:
-       # obtain session from the database
-        pass
-    knowledge = await hybrid_retrieve(query.prompt)
+@app.post('/chat/{session_id}', response_class=StreamingResponse)
+async def continue_chat(session_id: UUID, query: UserPrompt):
+    # obtain history from the database
+    new_query = {'role': 'user', 'content': query.prompt}
+    async with get_conn() as conn:
+        async with conn.cursor() as curr:
+            history = await curr.execute(
+                """
+                UPDATE session
+                SET history = history || %s::jsonb
+                WHERE session_id = %s
+                RETURNING history;
+                """
+            , (Jsonb(new_query), session_id)
+            )
+
+            row = await history.fetchone() # Returns a tuple in order of what you selected
+            history = row[0]
+
+            return StreamingResponse(prompt_llm(session_id, history), media_type='text/plain') 
+
+async def prompt_llm(session_id, history: list[dict[str:str]]):
+    knowledge = await hybrid_retrieve(history[-1]['content'])
     print('Retrieved Knowledge:')
     for chunk, similarity in knowledge:
         print(f' - (rrf: {similarity:.4f}) {chunk}')
@@ -76,14 +109,35 @@ async def start_chat(query: UserPrompt):
                 model=QWEN,
                 messages=[
                     {'role': 'system', 'content': instruction_prompt},
-                    {'role': 'user', 'content': query.prompt},
+                    *history
                 ],
                 stream=True
                 ),
-            timeout=0)
+            timeout=10)
 
+        collected = []
         async for chunk in stream:
-            yield chunk['message']['content']
+            content = chunk['message']['content']
+            collected.append(content)
+            yield content
+         
+        response = {'role': 'assistant', 'content' :"".join(collected)}
+        # then add collected to the prompt and save
+        
+        # save back response
+        async with get_conn() as conn:
+            async with conn.cursor() as curr:
+                await curr.execute(
+                    """
+                    UPDATE session
+                    -- append too the jsonb 'content' array
+                    SET history = history || %s::jsonb
+                    WHERE session_id = %s
+                    """,
+                    (Jsonb(response), session_id)
+                )
+        print(f"Session id for last chat: {session_id}")
+
     except TimeoutError as te:
         logging.error(f'error: {te}')
         yield "Error Request Timeout"
@@ -93,7 +147,6 @@ async def start_chat(query: UserPrompt):
     # res['status'] = 'success'
     # return res
 
-client = ollama.AsyncClient(host="http://host.docker.internal:11434")
 
 async def chunk_data(filepath: str) -> list[str]:
     """
@@ -110,7 +163,12 @@ async def add_dataset_to_db_hybrid(data_set: list[str]) -> None:
     async with get_conn() as conn:
         global bm25
         async with conn.cursor() as cur:
-            await cur.execute("TRUNCATE TABLE chunks")
+            await cur.execute(
+                """
+                TRUNCATE TABLE chunks;
+                TRUNCATE TABLE session;              
+                """
+            )
 
             bm25 = BM25Okapi([sentence.split() for sentence in data_set])
 
