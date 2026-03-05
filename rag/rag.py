@@ -7,10 +7,11 @@ from typing import Annotated
 
 import ollama
 import pymupdf
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+import pymupdf4llm
+from langchain_text_splitters import RecursiveCharacterTextSplitter, MarkdownTextSplitter
 from psycopg.types.json import Jsonb
 from rank_bm25 import BM25Okapi, BM25
-from fastapi import FastAPI, status, UploadFile
+from fastapi import FastAPI, status, UploadFile, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -43,6 +44,11 @@ class UserPrompt(BaseModel):
     # 64k tokens into words = 64k * 4
     prompt: Annotated[str, Field(min_length=1, max_length=256_000)]
 
+class DocumentUpload(BaseModel):
+    chunks_created: int
+    status: str = "Success"
+    filename: str 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI): 
     global chunks
@@ -54,7 +60,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-@app.post('/document')
+@app.post('/document', status_code=status.HTTP_201_CREATED, response_model=DocumentUpload)
 async def ingest_document(file: UploadFile):
     """
     Endpoint for document ingestion workflow:
@@ -67,10 +73,40 @@ async def ingest_document(file: UploadFile):
     embeddable = ['image/jpeg', 'image/png', 'image.heic', 'image.jpeg']
     # we accept all for now
     if file.content_type not in embeddable:
-       # extract the text (then images) via partiton in unstructured. but they need the file PATH
-        with pymupdf.Document(stream=file) as doc:
-            pass
-        
+        content = await file.read()
+        chunked_text = None
+        if file.content_type == 'application/pdf':
+        # extract the text (then images) via partiton in unstructured. but they need the file PATH
+            md_text = pymupdf4llm.to_markdown(pymupdf.Document(stream=content))
+
+            splitter = MarkdownTextSplitter(chunk_size=40, chunk_overlap=10)
+            chunked_text = splitter.split_text(md_text)
+
+            logger.info(f"Loading {len(chunked_text)} entries...")
+        elif file.content_type == 'text/plain':
+            splitter = RecursiveCharacterTextSplitter(['.', ',',r'\n'], chunk_size=400, chunk_overlap=60)
+            chunked_text = splitter.split_text(content.decode('utf-8'))
+            logger.info(f"Loading {len(chunked_text)} entries...")
+        else:
+            raise  HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail="unsupported media type")
+    
+        async with get_conn() as conn:
+            async with conn.cursor() as curr:
+                for i, chunk in enumerate(chunked_text): 
+                    embeddings = await client.embed(EMBEDDING_MODEL, input=chunk)
+                    embedding = embeddings['embeddings'][0]
+                    
+                    await curr.execute(
+                        """
+                        INSERT INTO chunks
+                        (content, embedding, metadata) 
+                        VALUES (%s, %s, %s) 
+                        """,
+                        (chunk, embedding, Jsonb({}))
+                    ) 
+                    logger.info(f"Added chunk {i+1}/{len(chunked_text)} to vector db") 
+        return DocumentUpload(chunks_created=len(chunked_text), filename=file.filename)
+
 
 @app.post('/chat', response_class=StreamingResponse)
 async def start_chat(query: UserPrompt):
@@ -133,8 +169,8 @@ async def prompt_llm(session_id, history: list[dict[str:str]]):
  
         stream = await asyncio.wait_for(
             client.chat(
-                # model=LANGUAGE_MODEL,
-                model=QWEN,
+                model=LANGUAGE_MODEL,
+                # model=QWEN,
                 messages=[
                     {'role': 'system', 'content': instruction_prompt},
                     *history
