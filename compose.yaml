@@ -17,6 +17,8 @@ services:
     tty: True
     env_file:
       - .env
+    volumes:
+      - ./rag:/app
     ports:
       - "8000:8000"
     depends_on:

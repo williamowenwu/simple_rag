@@ -8,7 +8,8 @@
 
 - [x] Async db client
 
-5. - [x] Better model (7B+)
+- [x] Better model (7B+)
+
 6. Documents to vector DB (PDFs, multiple sources)
 
 ## Productionizing
@@ -17,8 +18,10 @@
 
 - [x] Managing sessions
 
-9. Error handling and logging
-10. Input validation (Pydantic — comes free with FastAPI)
+- [x] Error handling and logging
+- [x] Input validation (Pydantic — comes free with FastAPI)
+- [ ] ingestion workflow
+
 11. Observability / OpenTelemetry
 
 ## Evaluation

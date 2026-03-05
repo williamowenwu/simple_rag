@@ -1,16 +1,18 @@
 import asyncio
+import tempfile
 from contextlib import asynccontextmanager
 from collections import defaultdict
 import logging
 from uuid import UUID
+from typing import Annotated
 
 import ollama
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from psycopg.types.json import Jsonb
 from rank_bm25 import BM25Okapi, BM25
-from fastapi import FastAPI, status, HTTPException
+from fastapi import FastAPI, status, UploadFile
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from db import get_conn
 
@@ -21,6 +23,7 @@ LANGUAGE_MODEL = 'hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF'
 QWEN = 'hf.co/Qwen/Qwen2.5-7B-Instruct-GGUF:latest'
 client = ollama.AsyncClient(host="http://host.docker.internal:11434")
 
+# aparently always create a module level logger because 
 # what do i need to be an api? there are somethings that don't necessarily need to be an api
 # anything that user interacts with the model (uploading things) :
 # 1. prompts/text
@@ -30,8 +33,16 @@ client = ollama.AsyncClient(host="http://host.docker.internal:11434")
 bm25: BM25 | None = None
 chunks: list[str] | None = None
 
+logger = logging.getLogger(__name__)
+logging.basicConfig(
+    level=logging.INFO,
+format=' %(name)s %(asctime)s - %(levelname)s - %(message)s',
+datefmt='%Y-%m-%d %H:%M:%S'
+)
+
 class UserPrompt(BaseModel):
-    prompt: str
+    # 64k tokens into words = 64k * 4
+    prompt: Annotated[str, Field(min_length=1, max_length=256_000)]
 
 @asynccontextmanager
 async def lifespan(app: FastAPI): 
@@ -44,6 +55,21 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+@app.post('/document')
+async def ingest_document(file: UploadFile):
+    """
+    Endpoint for document ingestion workflow:
+    1. determine file type
+    2. if nont embeddable (i.e. pdf) extract text & images
+    2a.split the text
+    3. embed
+    4. store in db
+    """
+    embeddable = ['image/jpeg', 'image/png', 'image.heic', 'image.jpeg']
+    # we accept all for now
+    if file.content_type not in embeddable:
+       # extract the text (then images) via partiton in unstructured. but they need the file PATH
+        pass
 @app.post('/chat', response_class=StreamingResponse)
 async def start_chat(query: UserPrompt):
     # start a new session
@@ -87,10 +113,10 @@ async def continue_chat(session_id: UUID, query: UserPrompt):
 
 async def prompt_llm(session_id, history: list[dict[str:str]]):
     knowledge = await hybrid_retrieve(history[-1]['content'])
-    print('Retrieved Knowledge:')
+    logger.info('Retrieved Knowledge:')
     for chunk, similarity in knowledge:
-        print(f' - (rrf: {similarity:.4f}) {chunk}')
-        # print(f' - (similarity: {similarity:.4f}) {chunk}')
+        logger.info(f' - (rrf: {similarity:.4f}) {chunk}')
+        # logger.info(f' - (similarity: {similarity:.4f}) {chunk}')
     res = {}
     res['knowledge'] = knowledge
     res['res'] = []
@@ -136,14 +162,14 @@ async def prompt_llm(session_id, history: list[dict[str:str]]):
                     """,
                     (Jsonb(response), session_id)
                 )
-        print(f"Session id for last chat: {session_id}")
+        logger.info(f"Session id for last chat: {session_id}")
 
-    except TimeoutError as te:
-        logging.error(f'error: {te}')
+    except TimeoutError:
+        logger.exception("timeout error") 
         yield "Error Request Timeout"
-    except Exception as e:
-        logging.error(f'base error: {e}')
-        raise
+    except Exception:
+        logger.exception("base error") 
+        yield f"Something went wrong :("
     # res['status'] = 'success'
     # return res
 
@@ -156,7 +182,7 @@ async def chunk_data(filepath: str) -> list[str]:
         splitter = RecursiveCharacterTextSplitter(['.', ',',r'\n'], chunk_size=400, chunk_overlap=60)
         #todo: im worried about doing readlines it will just load everything into memory idk if it scales
         chunked_data = splitter.split_text(f.read())
-        print(f"Loading {len(chunked_data)} entries...")
+        logger.info(f"Loading {len(chunked_data)} entries...")
         return chunked_data
 
 async def add_dataset_to_db_hybrid(data_set: list[str]) -> None:
@@ -184,7 +210,7 @@ async def add_dataset_to_db_hybrid(data_set: list[str]) -> None:
                     """,
                     (chunk, embedding, Jsonb({}))
                 ) 
-                print(f"Added chunk {i+1}/{len(data_set)} to vector db")
+                logger.info(f"Added chunk {i+1}/{len(data_set)} to vector db")
 
 async def rrf(semantic_res: list[tuple[float,str]], bm25_res: list[tuple[float]], k=60) -> tuple[float,str]:
     """
@@ -245,50 +271,50 @@ helps find document similarity regardless of length
 semantic search for vector embeddings closest to user's query
 """
 
-# SYNCHRONOUS/OLD FOR COMPARISON
+# SYNCHRONOUS/OLD FOR PERFORMANCE COMPARISON
 
 # line by line chunking strategy
-async def load_data(filepath: str) -> list[str]:
-    with open(filepath) as f:
-        dataset = f.readlines()
-        print(f"Loading {len(dataset)} entries...")
-        return dataset
+# async def load_data(filepath: str) -> list[str]:
+#     with open(filepath) as f:
+#         dataset = f.readlines()
+#         logger.info(f"Loading {len(dataset)} entries...")
+#         return dataset
 
-async def add_dataset_to_db(data_set: list[str]) -> None:
-    # Regular embedding without rrf
-    async with get_conn() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute("TRUNCATE TABLE chunks")
-            # chunking strategy of one line
-            for i, chunk in enumerate(data_set): 
-                embeddings = await client.embed(EMBEDDING_MODEL, input=chunk)
-                embedding = embeddings['embeddings'][0]
+# async def add_dataset_to_db(data_set: list[str]) -> None:
+#     # Regular embedding without rrf
+#     async with get_conn() as conn:
+#         async with conn.cursor() as cur:
+#             await cur.execute("TRUNCATE TABLE chunks")
+#             # chunking strategy of one line
+#             for i, chunk in enumerate(data_set): 
+#                 embeddings = await client.embed(EMBEDDING_MODEL, input=chunk)
+#                 embedding = embeddings['embeddings'][0]
                 
-                await cur.execute(
-                    """
-                    INSERT INTO chunks
-                    (content, embedding, metadata) 
-                    VALUES (%s, %s, %s) 
-                    """,
-                    (chunk, embedding, Jsonb({}))
-                ) 
-                print(f"Added chunk {i+1}/{len(data_set)} to vector db")
+#                 await cur.execute(
+#                     """
+#                     INSERT INTO chunks
+#                     (content, embedding, metadata) 
+#                     VALUES (%s, %s, %s) 
+#                     """,
+#                     (chunk, embedding, Jsonb({}))
+#                 ) 
+#                 logger.info(f"Added chunk {i+1}/{len(data_set)} to vector db")
 
-# obtains top x similarities in search and returns them
-async def retrieve(query: str, top:int=3) -> list[tuple]:
-    query_embedding = await client.embed(EMBEDDING_MODEL, input=query)
-    query_embeded = query_embedding['embeddings'][0]
+# # obtains top x similarities in search and returns them
+# async def retrieve(query: str, top:int=3) -> list[tuple]:
+#     query_embedding = await client.embed(EMBEDDING_MODEL, input=query)
+#     query_embeded = query_embedding['embeddings'][0]
 
-    async with get_conn() as conn: 
-        async with conn.cursor() as cur:
-            await cur.execute(
-                """
-                SELECT content, 1 - (embedding <=> %s::vector) as cosine_similarity
-                FROM chunks
-                ORDER BY cosine_similarity DESC
-                LIMIT %s
-                """,
-                (query_embeded, top)
-            )
-            # no need to convert?
-            return await cur.fetchall()
+#     async with get_conn() as conn: 
+#         async with conn.cursor() as cur:
+#             await cur.execute(
+#                 """
+#                 SELECT content, 1 - (embedding <=> %s::vector) as cosine_similarity
+#                 FROM chunks
+#                 ORDER BY cosine_similarity DESC
+#                 LIMIT %s
+#                 """,
+#                 (query_embeded, top)
+#             )
+#             # no need to convert?
+#             return await cur.fetchall()
