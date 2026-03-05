@@ -1,5 +1,4 @@
 import asyncio
-import tempfile
 from contextlib import asynccontextmanager
 from collections import defaultdict
 import logging
@@ -7,6 +6,7 @@ from uuid import UUID
 from typing import Annotated
 
 import ollama
+import pymupdf
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from psycopg.types.json import Jsonb
 from rank_bm25 import BM25Okapi, BM25
@@ -16,7 +16,6 @@ from pydantic import BaseModel, Field
 
 from db import get_conn
 
-# vector database
 EMBEDDING_MODEL = 'hf.co/CompendiumLabs/bge-base-en-v1.5-gguf'
 LANGUAGE_MODEL = 'hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF'
 # Needs more than 4gb vram
@@ -62,14 +61,17 @@ async def ingest_document(file: UploadFile):
     1. determine file type
     2. if nont embeddable (i.e. pdf) extract text & images
     2a.split the text
-    3. embed
+    3. embeds
     4. store in db
     """
     embeddable = ['image/jpeg', 'image/png', 'image.heic', 'image.jpeg']
     # we accept all for now
     if file.content_type not in embeddable:
        # extract the text (then images) via partiton in unstructured. but they need the file PATH
-        pass
+        with pymupdf.Document(stream=file) as doc:
+            pass
+        
+
 @app.post('/chat', response_class=StreamingResponse)
 async def start_chat(query: UserPrompt):
     # start a new session

@@ -23,6 +23,7 @@ psycopg==3.3.3
 psycopg-binary==3.3.3
 pydantic==2.12.5
 pydantic_core==2.41.5
+PyMuPDF==1.27.1
 PyYAML==6.0.3
 rank-bm25==0.2.2
 requests==2.32.5
